@@ -215,6 +215,9 @@ class LSTMVAE(pl.LightningModule):
             nn.Linear(hidden_dim // 2, 3)  # 3 classes: normal, tsunami, volcano
         )
 
+        # Per-horizon binary event heads
+        # Each Linear(latent_dim, 2) outputs [tsunami_prob, volcano_prob] for that horizon
+        # Index 0 = tsunami, Index 1 = volcano
         self.horizon_event_heads = nn.ModuleDict({
             str(horizon): nn.Linear(latent_dim, 2)
             for horizon in self.prediction_horizons
@@ -343,8 +346,16 @@ class LSTMVAE(pl.LightningModule):
                 continue
 
             labels = labels.to(device)
-            parts = label_name.split('_')
-            horizon = parts[-1].replace('m', '') if parts else ''
+            # Robust horizon parsing: extract trailing number before optional 'm' suffix
+            # e.g., "tsunami_15m" -> "15", "volcano_60" -> "60"
+            horizon = None
+            if label_name.endswith('m') and label_name[:-1].split('_')[-1].isdigit():
+                horizon = label_name[:-1].split('_')[-1]
+            elif label_name.split('_')[-1].isdigit():
+                horizon = label_name.split('_')[-1]
+            
+            if horizon is None:
+                continue  # Skip labels without valid horizon format
 
             if label_name.startswith('event_'):
                 event_losses.append(
@@ -404,7 +415,7 @@ class LSTMVAE(pl.LightningModule):
         vae_loss = recon_loss + beta * kl_loss
         
         # Event prediction loss (if labels available)
-        event_loss = self._compute_event_loss(outputs, y) if y is not None else vae_loss.new_tensor(0.0)
+        event_loss = self._compute_event_loss(outputs, y) if y else vae_loss.new_tensor(0.0)
         
         # Total loss
         total_loss = vae_loss + 0.1 * event_loss  # Weight event loss
@@ -603,8 +614,17 @@ def create_dataloaders(
     """Create train, validation, and test dataloaders with time-series split."""
     
     n_samples = len(X)
+    
+    # Handle edge case: tiny datasets
+    if n_samples < 3:
+        raise ValueError(f"Dataset too small ({n_samples} samples). Need at least 3 samples for train/val/test split.")
+    
     train_end = int(n_samples * train_ratio)
     val_end = int(n_samples * (train_ratio + val_ratio))
+    
+    # Ensure at least 1 sample per split
+    train_end = max(1, min(train_end, n_samples - 2))
+    val_end = max(train_end + 1, min(val_end, n_samples - 1))
     
     # Time-series split (no shuffling!)
     train_dataset = CryptoDataset(X[:train_end], {k: v[:train_end] for k, v in y.items()})
@@ -642,10 +662,16 @@ def load_config(config_path: str = "config.yaml") -> Dict:
     """Load configuration from YAML file."""
     import yaml
     
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    return config
+    try:
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return config if config else {}
+    except FileNotFoundError:
+        logger.warning(f"Config file '{config_path}' not found. Using defaults.")
+        return {}
+    except yaml.YAMLError as e:
+        logger.error(f"Error parsing config file: {e}")
+        raise
 
 
 if __name__ == "__main__":

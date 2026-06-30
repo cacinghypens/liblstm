@@ -37,6 +37,7 @@ LSTMVAEImpl::LSTMVAEImpl(const Options& options) : options_(options) {
     register_module("event_head", event_head_);
     
     // Per-horizon binary event heads
+    horizon_event_heads_ = torch::nn::ModuleDict();
     for (const auto& horizon : options_.prediction_horizons) {
         std::string horizon_str = std::to_string(horizon);
         auto head = torch::nn::Linear(options_.latent_dim, 2);
